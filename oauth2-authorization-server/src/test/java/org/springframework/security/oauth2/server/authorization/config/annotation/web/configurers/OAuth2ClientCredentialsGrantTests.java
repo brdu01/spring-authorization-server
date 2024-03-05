@@ -1,5 +1,5 @@
 /*
- * Copyright 2020-2023 the original author or authors.
+ * Copyright 2020-2024 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,13 +24,12 @@ import java.util.Base64;
 import java.util.List;
 import java.util.function.Consumer;
 
-import jakarta.servlet.ServletException;
-import jakarta.servlet.http.HttpServletRequest;
-import jakarta.servlet.http.HttpServletResponse;
-
 import com.nimbusds.jose.jwk.JWKSet;
 import com.nimbusds.jose.jwk.source.JWKSource;
 import com.nimbusds.jose.proc.SecurityContext;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -61,7 +60,6 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.oauth2.core.AuthorizationGrantType;
 import org.springframework.security.oauth2.core.ClientAuthenticationMethod;
 import org.springframework.security.oauth2.core.OAuth2AccessToken;
-import org.springframework.security.oauth2.core.OAuth2ErrorCodes;
 import org.springframework.security.oauth2.core.endpoint.OAuth2ParameterNames;
 import org.springframework.security.oauth2.jose.TestJwks;
 import org.springframework.security.oauth2.server.authorization.JdbcOAuth2AuthorizationService;
@@ -75,6 +73,7 @@ import org.springframework.security.oauth2.server.authorization.authentication.O
 import org.springframework.security.oauth2.server.authorization.authentication.OAuth2ClientCredentialsAuthenticationToken;
 import org.springframework.security.oauth2.server.authorization.authentication.OAuth2DeviceCodeAuthenticationProvider;
 import org.springframework.security.oauth2.server.authorization.authentication.OAuth2RefreshTokenAuthenticationProvider;
+import org.springframework.security.oauth2.server.authorization.authentication.OAuth2TokenExchangeAuthenticationProvider;
 import org.springframework.security.oauth2.server.authorization.authentication.PublicClientAuthenticationProvider;
 import org.springframework.security.oauth2.server.authorization.client.JdbcRegisteredClientRepository;
 import org.springframework.security.oauth2.server.authorization.client.JdbcRegisteredClientRepository.RegisteredClientParametersMapper;
@@ -94,6 +93,7 @@ import org.springframework.security.oauth2.server.authorization.web.authenticati
 import org.springframework.security.oauth2.server.authorization.web.authentication.OAuth2ClientCredentialsAuthenticationConverter;
 import org.springframework.security.oauth2.server.authorization.web.authentication.OAuth2DeviceCodeAuthenticationConverter;
 import org.springframework.security.oauth2.server.authorization.web.authentication.OAuth2RefreshTokenAuthenticationConverter;
+import org.springframework.security.oauth2.server.authorization.web.authentication.OAuth2TokenExchangeAuthenticationConverter;
 import org.springframework.security.oauth2.server.authorization.web.authentication.PublicClientAuthenticationConverter;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.AuthenticationConverter;
@@ -102,7 +102,6 @@ import org.springframework.security.web.authentication.AuthenticationSuccessHand
 import org.springframework.security.web.util.matcher.RequestMatcher;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
-import org.springframework.web.util.UriComponentsBuilder;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -236,37 +235,6 @@ public class OAuth2ClientCredentialsGrantTests {
 		verify(jwtCustomizer).customize(any());
 	}
 
-	// gh-1378
-	@Test
-	public void requestWhenTokenRequestWithClientCredentialsInQueryParamThenInvalidRequest() throws Exception {
-		this.spring.register(AuthorizationServerConfiguration.class).autowire();
-
-		RegisteredClient registeredClient = TestRegisteredClients.registeredClient2().build();
-		this.registeredClientRepository.save(registeredClient);
-
-		String tokenEndpointUri = UriComponentsBuilder.fromUriString(DEFAULT_TOKEN_ENDPOINT_URI)
-				.queryParam(OAuth2ParameterNames.CLIENT_ID, registeredClient.getClientId())
-				.toUriString();
-
-		this.mvc.perform(post(tokenEndpointUri)
-						.param(OAuth2ParameterNames.CLIENT_SECRET, registeredClient.getClientSecret())
-						.param(OAuth2ParameterNames.GRANT_TYPE, AuthorizationGrantType.CLIENT_CREDENTIALS.getValue())
-						.param(OAuth2ParameterNames.SCOPE, "scope1 scope2"))
-				.andExpect(status().isBadRequest())
-				.andExpect(jsonPath("$.error").value(OAuth2ErrorCodes.INVALID_REQUEST));
-
-		tokenEndpointUri = UriComponentsBuilder.fromUriString(DEFAULT_TOKEN_ENDPOINT_URI)
-				.queryParam(OAuth2ParameterNames.CLIENT_SECRET, registeredClient.getClientSecret())
-				.toUriString();
-
-		this.mvc.perform(post(tokenEndpointUri)
-						.param(OAuth2ParameterNames.CLIENT_ID, registeredClient.getClientId())
-						.param(OAuth2ParameterNames.GRANT_TYPE, AuthorizationGrantType.CLIENT_CREDENTIALS.getValue())
-						.param(OAuth2ParameterNames.SCOPE, "scope1 scope2"))
-				.andExpect(status().isBadRequest())
-				.andExpect(jsonPath("$.error").value(OAuth2ErrorCodes.INVALID_REQUEST));
-	}
-
 	@Test
 	public void requestWhenTokenRequestPostsClientCredentialsAndRequiresUpgradingThenClientSecretUpgraded() throws Exception {
 		this.spring.register(AuthorizationServerConfigurationCustomPasswordEncoder.class).autowire();
@@ -327,7 +295,8 @@ public class OAuth2ClientCredentialsGrantTests {
 						converter instanceof OAuth2AuthorizationCodeAuthenticationConverter ||
 						converter instanceof OAuth2RefreshTokenAuthenticationConverter ||
 						converter instanceof OAuth2ClientCredentialsAuthenticationConverter ||
-						converter instanceof OAuth2DeviceCodeAuthenticationConverter);
+						converter instanceof OAuth2DeviceCodeAuthenticationConverter ||
+						converter instanceof OAuth2TokenExchangeAuthenticationConverter);
 
 		verify(authenticationProvider).authenticate(eq(clientCredentialsAuthentication));
 
@@ -340,7 +309,8 @@ public class OAuth2ClientCredentialsGrantTests {
 						provider instanceof OAuth2AuthorizationCodeAuthenticationProvider ||
 						provider instanceof OAuth2RefreshTokenAuthenticationProvider ||
 						provider instanceof OAuth2ClientCredentialsAuthenticationProvider ||
-						provider instanceof OAuth2DeviceCodeAuthenticationProvider);
+						provider instanceof OAuth2DeviceCodeAuthenticationProvider ||
+						provider instanceof OAuth2TokenExchangeAuthenticationProvider);
 
 		verify(authenticationSuccessHandler).onAuthenticationSuccess(any(), any(), eq(accessTokenAuthentication));
 	}
@@ -388,6 +358,30 @@ public class OAuth2ClientCredentialsGrantTests {
 						provider instanceof PublicClientAuthenticationProvider);
 
 		verify(authenticationSuccessHandler).onAuthenticationSuccess(any(), any(), eq(clientPrincipal));
+	}
+
+	@Test
+	public void requestWhenTokenRequestIncludesIssuerPathThenIssuerResolvedWithPath() throws Exception {
+		this.spring.register(AuthorizationServerConfiguration.class).autowire();
+
+		RegisteredClient registeredClient = TestRegisteredClients.registeredClient2().build();
+		this.registeredClientRepository.save(registeredClient);
+
+		String issuer = "https://example.com:8443/issuer1";
+
+		this.mvc.perform(post(issuer.concat(DEFAULT_TOKEN_ENDPOINT_URI))
+						.param(OAuth2ParameterNames.GRANT_TYPE, AuthorizationGrantType.CLIENT_CREDENTIALS.getValue())
+						.param(OAuth2ParameterNames.SCOPE, "scope1 scope2")
+						.header(HttpHeaders.AUTHORIZATION, "Basic " + encodeBasicAuth(
+								registeredClient.getClientId(), registeredClient.getClientSecret())))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.access_token").isNotEmpty())
+				.andExpect(jsonPath("$.scope").value("scope1 scope2"));
+
+		ArgumentCaptor<JwtEncodingContext> jwtEncodingContextCaptor = ArgumentCaptor.forClass(JwtEncodingContext.class);
+		verify(jwtCustomizer).customize(jwtEncodingContextCaptor.capture());
+		JwtEncodingContext jwtEncodingContext = jwtEncodingContextCaptor.getValue();
+		assertThat(jwtEncodingContext.getAuthorizationServerContext().getIssuer()).isEqualTo(issuer);
 	}
 
 	private static String encodeBasicAuth(String clientId, String secret) throws Exception {

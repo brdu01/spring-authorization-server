@@ -1,5 +1,5 @@
 /*
- * Copyright 2020-2021 the original author or authors.
+ * Copyright 2020-2023 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,6 +24,10 @@ import java.util.List;
 import java.util.Set;
 import java.util.function.Function;
 
+import org.springframework.aot.hint.RuntimeHints;
+import org.springframework.aot.hint.RuntimeHintsRegistrar;
+import org.springframework.context.annotation.ImportRuntimeHints;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.dao.DataRetrievalFailureException;
 import org.springframework.jdbc.core.ArgumentPreparedStatementSetter;
 import org.springframework.jdbc.core.JdbcOperations;
@@ -43,19 +47,37 @@ import org.springframework.util.StringUtils;
  * {@link JdbcOperations} for {@link OAuth2AuthorizationConsent} persistence.
  *
  * <p>
- * <b>NOTE:</b> This {@code OAuth2AuthorizationConsentService} depends on the table definition
+ * <b>IMPORTANT:</b> This {@code OAuth2AuthorizationConsentService} depends on the table definition
  * described in
  * "classpath:org/springframework/security/oauth2/server/authorization/oauth2-authorization-consent-schema.sql" and
  * therefore MUST be defined in the database schema.
  *
+ * <p>
+ * <b>NOTE:</b> This {@code OAuth2AuthorizationConsentService} is a simplified JDBC implementation that MAY be used in a production environment.
+ * However, it does have limitations as it likely won't perform well in an environment requiring high throughput.
+ * The expectation is that the consuming application will provide their own implementation of {@code OAuth2AuthorizationConsentService}
+ * that meets the performance requirements for its deployment environment.
+ *
  * @author Ovidiu Popa
+ * @author Josh Long
  * @since 0.1.2
  * @see OAuth2AuthorizationConsentService
  * @see OAuth2AuthorizationConsent
  * @see JdbcOperations
  * @see RowMapper
  */
+@ImportRuntimeHints(JdbcOAuth2AuthorizationConsentService.JdbcOAuth2AuthorizationConsentServiceRuntimeHintsRegistrar.class)
 public class JdbcOAuth2AuthorizationConsentService implements OAuth2AuthorizationConsentService {
+
+	static class JdbcOAuth2AuthorizationConsentServiceRuntimeHintsRegistrar implements RuntimeHintsRegistrar {
+
+		@Override
+		public void registerHints(RuntimeHints hints, ClassLoader classLoader) {
+			hints.resources().registerResource(new ClassPathResource(
+					"org/springframework/security/oauth2/server/authorization/oauth2-authorization-consent-schema.sql"));
+		}
+
+	}
 
 	// @formatter:off
 	private static final String COLUMN_NAMES = "registered_client_id, "

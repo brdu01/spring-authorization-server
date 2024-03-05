@@ -35,6 +35,10 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.Module;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import org.springframework.aot.hint.RuntimeHints;
+import org.springframework.aot.hint.RuntimeHintsRegistrar;
+import org.springframework.context.annotation.ImportRuntimeHints;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.dao.DataRetrievalFailureException;
 import org.springframework.jdbc.core.ArgumentPreparedStatementSetter;
 import org.springframework.jdbc.core.ConnectionCallback;
@@ -68,20 +72,38 @@ import org.springframework.util.StringUtils;
  * {@link JdbcOperations} for {@link OAuth2Authorization} persistence.
  *
  * <p>
- * <b>NOTE:</b> This {@code OAuth2AuthorizationService} depends on the table definition
+ * <b>IMPORTANT:</b> This {@code OAuth2AuthorizationService} depends on the table definition
  * described in
  * "classpath:org/springframework/security/oauth2/server/authorization/oauth2-authorization-schema.sql" and
  * therefore MUST be defined in the database schema.
  *
+ * <p>
+ * <b>NOTE:</b> This {@code OAuth2AuthorizationService} is a simplified JDBC implementation that MAY be used in a production environment.
+ * However, it does have limitations as it likely won't perform well in an environment requiring high throughput.
+ * The expectation is that the consuming application will provide their own implementation of {@code OAuth2AuthorizationService}
+ * that meets the performance requirements for its deployment environment.
+ *
  * @author Ovidiu Popa
  * @author Joe Grandja
+ * @author Josh Long
  * @since 0.1.2
  * @see OAuth2AuthorizationService
  * @see OAuth2Authorization
  * @see JdbcOperations
  * @see RowMapper
  */
+@ImportRuntimeHints(JdbcOAuth2AuthorizationService.JdbcOAuth2AuthorizationServiceRuntimeHintsRegistrar.class)
 public class JdbcOAuth2AuthorizationService implements OAuth2AuthorizationService {
+
+	static class JdbcOAuth2AuthorizationServiceRuntimeHintsRegistrar implements RuntimeHintsRegistrar {
+
+		@Override
+		public void registerHints(RuntimeHints hints, ClassLoader classLoader) {
+			hints.resources().registerResource(new ClassPathResource(
+					"org/springframework/security/oauth2/server/authorization/oauth2-authorization-schema.sql"));
+		}
+
+	}
 
 	// @formatter:off
 	private static final String COLUMN_NAMES = "id, "

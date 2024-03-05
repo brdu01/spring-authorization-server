@@ -1,5 +1,5 @@
 /*
- * Copyright 2020-2023 the original author or authors.
+ * Copyright 2020-2024 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -55,6 +55,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.embedded.EmbeddedDatabase;
 import org.springframework.jdbc.datasource.embedded.EmbeddedDatabaseBuilder;
 import org.springframework.jdbc.datasource.embedded.EmbeddedDatabaseType;
+import org.springframework.lang.Nullable;
 import org.springframework.mock.http.client.MockClientHttpResponse;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.security.authentication.AuthenticationProvider;
@@ -65,9 +66,12 @@ import org.springframework.security.config.annotation.web.configuration.EnableWe
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.security.crypto.keygen.Base64StringKeyGenerator;
+import org.springframework.security.crypto.keygen.StringKeyGenerator;
 import org.springframework.security.crypto.password.NoOpPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.oauth2.core.AuthorizationGrantType;
+import org.springframework.security.oauth2.core.OAuth2RefreshToken;
 import org.springframework.security.oauth2.core.OAuth2Token;
 import org.springframework.security.oauth2.core.endpoint.OAuth2AccessTokenResponse;
 import org.springframework.security.oauth2.core.endpoint.OAuth2AuthorizationRequest;
@@ -154,6 +158,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * @author Daniel Garnier-Moiroux
  * @author Dmitriy Dubson
  * @author Steve Riesenberg
+ * @author Greg Li
  */
 @ExtendWith(SpringTestContextExtension.class)
 public class OAuth2AuthorizationCodeGrantTests {
@@ -256,7 +261,7 @@ public class OAuth2AuthorizationCodeGrantTests {
 		this.registeredClientRepository.save(registeredClient);
 
 		this.mvc.perform(get(DEFAULT_AUTHORIZATION_ENDPOINT_URI)
-				.params(getAuthorizationRequestParameters(registeredClient)))
+				.queryParams(getAuthorizationRequestParameters(registeredClient)))
 				.andExpect(status().isUnauthorized())
 				.andReturn();
 	}
@@ -298,7 +303,7 @@ public class OAuth2AuthorizationCodeGrantTests {
 
 		MultiValueMap<String, String> authorizationRequestParameters = getAuthorizationRequestParameters(registeredClient);
 		MvcResult mvcResult = this.mvc.perform(get(authorizationEndpointUri)
-				.params(authorizationRequestParameters)
+				.queryParams(authorizationRequestParameters)
 				.with(user("user")))
 				.andExpect(status().is3xxRedirection())
 				.andReturn();
@@ -390,9 +395,9 @@ public class OAuth2AuthorizationCodeGrantTests {
 		this.registeredClientRepository.save(registeredClient);
 
 		MvcResult mvcResult = this.mvc.perform(get(DEFAULT_AUTHORIZATION_ENDPOINT_URI)
-				.params(getAuthorizationRequestParameters(registeredClient))
-				.param(PkceParameterNames.CODE_CHALLENGE, S256_CODE_CHALLENGE)
-				.param(PkceParameterNames.CODE_CHALLENGE_METHOD, "S256")
+				.queryParams(getAuthorizationRequestParameters(registeredClient))
+				.queryParam(PkceParameterNames.CODE_CHALLENGE, S256_CODE_CHALLENGE)
+				.queryParam(PkceParameterNames.CODE_CHALLENGE_METHOD, "S256")
 				.with(user("user")))
 				.andExpect(status().is3xxRedirection())
 				.andReturn();
@@ -426,6 +431,54 @@ public class OAuth2AuthorizationCodeGrantTests {
 		assertThat(authorizationCodeToken.getMetadata().get(OAuth2Authorization.Token.INVALIDATED_METADATA_NAME)).isEqualTo(true);
 	}
 
+	// gh-1430
+	@Test
+	public void requestWhenPublicClientWithPkceAndCustomRefreshTokenGeneratorThenReturnRefreshToken() throws Exception {
+		this.spring.register(AuthorizationServerConfigurationWithCustomRefreshTokenGenerator.class).autowire();
+
+		RegisteredClient registeredClient = TestRegisteredClients.registeredPublicClient()
+				.authorizationGrantType(AuthorizationGrantType.REFRESH_TOKEN)
+				.build();
+		this.registeredClientRepository.save(registeredClient);
+
+		MvcResult mvcResult = this.mvc.perform(get(DEFAULT_AUTHORIZATION_ENDPOINT_URI)
+				.queryParams(getAuthorizationRequestParameters(registeredClient))
+				.queryParam(PkceParameterNames.CODE_CHALLENGE, S256_CODE_CHALLENGE)
+				.queryParam(PkceParameterNames.CODE_CHALLENGE_METHOD, "S256")
+				.with(user("user")))
+				.andExpect(status().is3xxRedirection())
+				.andReturn();
+		String redirectedUrl = mvcResult.getResponse().getRedirectedUrl();
+		assertThat(redirectedUrl).matches("https://example.com\\?code=.{15,}&state=" + STATE_URL_ENCODED);
+
+		String authorizationCode = extractParameterFromRedirectUri(redirectedUrl, "code");
+		OAuth2Authorization authorizationCodeAuthorization = this.authorizationService.findByToken(authorizationCode, AUTHORIZATION_CODE_TOKEN_TYPE);
+		assertThat(authorizationCodeAuthorization).isNotNull();
+		assertThat(authorizationCodeAuthorization.getAuthorizationGrantType()).isEqualTo(AuthorizationGrantType.AUTHORIZATION_CODE);
+
+		this.mvc.perform(post(DEFAULT_TOKEN_ENDPOINT_URI)
+				.params(getTokenRequestParameters(registeredClient, authorizationCodeAuthorization))
+				.param(OAuth2ParameterNames.CLIENT_ID, registeredClient.getClientId())
+				.param(PkceParameterNames.CODE_VERIFIER, S256_CODE_VERIFIER))
+				.andExpect(header().string(HttpHeaders.CACHE_CONTROL, containsString("no-store")))
+				.andExpect(header().string(HttpHeaders.PRAGMA, containsString("no-cache")))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.access_token").isNotEmpty())
+				.andExpect(jsonPath("$.token_type").isNotEmpty())
+				.andExpect(jsonPath("$.expires_in").isNotEmpty())
+				.andExpect(jsonPath("$.refresh_token").isNotEmpty())
+				.andExpect(jsonPath("$.scope").isNotEmpty());
+
+		OAuth2Authorization authorization = this.authorizationService.findById(authorizationCodeAuthorization.getId());
+		assertThat(authorization).isNotNull();
+		assertThat(authorization.getAccessToken()).isNotNull();
+		assertThat(authorization.getRefreshToken()).isNotNull();
+
+		OAuth2Authorization.Token<OAuth2AuthorizationCode> authorizationCodeToken = authorization.getToken(OAuth2AuthorizationCode.class);
+		assertThat(authorizationCodeToken).isNotNull();
+		assertThat(authorizationCodeToken.getMetadata().get(OAuth2Authorization.Token.INVALIDATED_METADATA_NAME)).isEqualTo(true);
+	}
+
 	@Test
 	public void requestWhenConfidentialClientWithPkceAndMissingCodeVerifierThenBadRequest() throws Exception {
 		this.spring.register(AuthorizationServerConfiguration.class).autowire();
@@ -435,9 +488,9 @@ public class OAuth2AuthorizationCodeGrantTests {
 
 		MultiValueMap<String, String> authorizationRequestParameters = getAuthorizationRequestParameters(registeredClient);
 		MvcResult mvcResult = this.mvc.perform(get(DEFAULT_AUTHORIZATION_ENDPOINT_URI)
-				.params(authorizationRequestParameters)
-				.param(PkceParameterNames.CODE_CHALLENGE, S256_CODE_CHALLENGE)
-				.param(PkceParameterNames.CODE_CHALLENGE_METHOD, "S256")
+				.queryParams(authorizationRequestParameters)
+				.queryParam(PkceParameterNames.CODE_CHALLENGE, S256_CODE_CHALLENGE)
+				.queryParam(PkceParameterNames.CODE_CHALLENGE_METHOD, "S256")
 				.with(user("user")))
 				.andExpect(status().is3xxRedirection())
 				.andReturn();
@@ -474,7 +527,7 @@ public class OAuth2AuthorizationCodeGrantTests {
 
 		MultiValueMap<String, String> authorizationRequestParameters = getAuthorizationRequestParameters(registeredClient);
 		MvcResult mvcResult = this.mvc.perform(get(DEFAULT_AUTHORIZATION_ENDPOINT_URI)
-				.params(authorizationRequestParameters)
+				.queryParams(authorizationRequestParameters)
 				.with(user("user")))
 				.andExpect(status().is3xxRedirection())
 				.andReturn();
@@ -520,7 +573,7 @@ public class OAuth2AuthorizationCodeGrantTests {
 		this.registeredClientRepository.save(registeredClient);
 
 		String consentPage = this.mvc.perform(get(DEFAULT_AUTHORIZATION_ENDPOINT_URI)
-				.params(getAuthorizationRequestParameters(registeredClient))
+				.queryParams(getAuthorizationRequestParameters(registeredClient))
 				.with(user("user")))
 				.andExpect(status().is2xxSuccessful())
 				.andReturn()
@@ -603,7 +656,7 @@ public class OAuth2AuthorizationCodeGrantTests {
 		this.registeredClientRepository.save(registeredClient);
 
 		MvcResult mvcResult = this.mvc.perform(get(DEFAULT_AUTHORIZATION_ENDPOINT_URI)
-				.params(getAuthorizationRequestParameters(registeredClient))
+				.queryParams(getAuthorizationRequestParameters(registeredClient))
 				.with(user("user")))
 				.andExpect(status().is3xxRedirection())
 				.andReturn();
@@ -738,9 +791,9 @@ public class OAuth2AuthorizationCodeGrantTests {
 		this.registeredClientRepository.save(registeredClient);
 
 		MvcResult mvcResult = this.mvc.perform(get(DEFAULT_AUTHORIZATION_ENDPOINT_URI)
-				.params(getAuthorizationRequestParameters(registeredClient))
-				.param(PkceParameterNames.CODE_CHALLENGE, S256_CODE_CHALLENGE)
-				.param(PkceParameterNames.CODE_CHALLENGE_METHOD, "S256")
+				.queryParams(getAuthorizationRequestParameters(registeredClient))
+				.queryParam(PkceParameterNames.CODE_CHALLENGE, S256_CODE_CHALLENGE)
+				.queryParam(PkceParameterNames.CODE_CHALLENGE_METHOD, "S256")
 				.with(user("user")))
 				.andExpect(status().is3xxRedirection())
 				.andReturn();
@@ -771,6 +824,46 @@ public class OAuth2AuthorizationCodeGrantTests {
 		org.springframework.security.core.context.SecurityContext securityContext =
 				securityContextRepository.loadDeferredContext(mvcResult.getRequest()).get();
 		assertThat(securityContext.getAuthentication()).isNull();
+	}
+
+	@Test
+	public void requestWhenAuthorizationAndTokenRequestIncludesIssuerPathThenIssuerResolvedWithPath() throws Exception {
+		this.spring.register(AuthorizationServerConfigurationWithTokenGenerator.class).autowire();
+
+		RegisteredClient registeredClient = TestRegisteredClients.registeredPublicClient().build();
+		this.registeredClientRepository.save(registeredClient);
+
+		String issuer = "https://example.com:8443/issuer1";
+
+		MvcResult mvcResult = this.mvc.perform(get(issuer.concat(DEFAULT_AUTHORIZATION_ENDPOINT_URI))
+						.queryParams(getAuthorizationRequestParameters(registeredClient))
+						.queryParam(PkceParameterNames.CODE_CHALLENGE, S256_CODE_CHALLENGE)
+						.queryParam(PkceParameterNames.CODE_CHALLENGE_METHOD, "S256")
+						.with(user("user")))
+				.andExpect(status().is3xxRedirection())
+				.andReturn();
+
+		String authorizationCode = extractParameterFromRedirectUri(mvcResult.getResponse().getRedirectedUrl(), "code");
+		OAuth2Authorization authorizationCodeAuthorization = this.authorizationService.findByToken(authorizationCode, AUTHORIZATION_CODE_TOKEN_TYPE);
+
+		this.mvc.perform(post(issuer.concat(DEFAULT_TOKEN_ENDPOINT_URI))
+				.params(getTokenRequestParameters(registeredClient, authorizationCodeAuthorization))
+				.param(OAuth2ParameterNames.CLIENT_ID, registeredClient.getClientId())
+				.param(PkceParameterNames.CODE_VERIFIER, S256_CODE_VERIFIER))
+				.andExpect(header().string(HttpHeaders.CACHE_CONTROL, containsString("no-store")))
+				.andExpect(header().string(HttpHeaders.PRAGMA, containsString("no-cache")))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.access_token").isNotEmpty())
+				.andExpect(jsonPath("$.token_type").isNotEmpty())
+				.andExpect(jsonPath("$.expires_in").isNotEmpty())
+				.andExpect(jsonPath("$.refresh_token").doesNotExist())
+				.andExpect(jsonPath("$.scope").isNotEmpty())
+				.andReturn();
+
+		ArgumentCaptor<OAuth2TokenContext> tokenContextCaptor = ArgumentCaptor.forClass(OAuth2TokenContext.class);
+		verify(tokenGenerator).generate(tokenContextCaptor.capture());
+		OAuth2TokenContext tokenContext = tokenContextCaptor.getValue();
+		assertThat(tokenContext.getAuthorizationServerContext().getIssuer()).isEqualTo(issuer);
 	}
 
 	private static MultiValueMap<String, String> getAuthorizationRequestParameters(RegisteredClient registeredClient) {
@@ -890,6 +983,42 @@ public class OAuth2AuthorizationCodeGrantTests {
 			ParametersMapper() {
 				super();
 				getObjectMapper().addMixIn(TestingAuthenticationToken.class, TestingAuthenticationTokenMixin.class);
+			}
+
+		}
+
+	}
+
+	@EnableWebSecurity
+	@Import(OAuth2AuthorizationServerConfiguration.class)
+	static class AuthorizationServerConfigurationWithCustomRefreshTokenGenerator extends AuthorizationServerConfiguration {
+
+		@Bean
+		JwtEncoder jwtEncoder() {
+			return jwtEncoder;
+		}
+
+		@Bean
+		OAuth2TokenGenerator<?> tokenGenerator() {
+			JwtGenerator jwtGenerator = new JwtGenerator(jwtEncoder());
+			jwtGenerator.setJwtCustomizer(jwtCustomizer());
+			OAuth2TokenGenerator<OAuth2RefreshToken> refreshTokenGenerator = new CustomRefreshTokenGenerator();
+			return new DelegatingOAuth2TokenGenerator(jwtGenerator, refreshTokenGenerator);
+		}
+
+		private static final class CustomRefreshTokenGenerator implements OAuth2TokenGenerator<OAuth2RefreshToken> {
+			private final StringKeyGenerator refreshTokenGenerator =
+					new Base64StringKeyGenerator(Base64.getUrlEncoder().withoutPadding(), 96);
+
+			@Nullable
+			@Override
+			public OAuth2RefreshToken generate(OAuth2TokenContext context) {
+				if (!OAuth2TokenType.REFRESH_TOKEN.equals(context.getTokenType())) {
+					return null;
+				}
+				Instant issuedAt = Instant.now();
+				Instant expiresAt = issuedAt.plus(context.getRegisteredClient().getTokenSettings().getRefreshTokenTimeToLive());
+				return new OAuth2RefreshToken(this.refreshTokenGenerator.generateKey(), issuedAt, expiresAt);
 			}
 
 		}

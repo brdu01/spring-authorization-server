@@ -7,7 +7,10 @@ plugins {
 
 group = project.rootProject.group
 version = project.rootProject.version
-sourceCompatibility = "17"
+
+java {
+	sourceCompatibility = JavaVersion.VERSION_17
+}
 
 antora {
 	playbook = "cached-antora-playbook.yml"
@@ -46,7 +49,7 @@ repositories {
 }
 
 dependencies {
-	implementation(platform("org.springframework.boot:spring-boot-dependencies:3.1.0")) {
+	implementation(platform("org.springframework.boot:spring-boot-dependencies:3.2.2")) {
 		exclude group: "org.springframework.security", module: "spring-security-oauth2-authorization-server"
 	}
 	implementation platform("org.springframework.security:spring-security-bom:6.1.0")
